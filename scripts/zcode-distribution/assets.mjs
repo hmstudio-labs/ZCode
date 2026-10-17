@@ -73,7 +73,7 @@ function shouldCopyPackagePath(packageDirectory, source) {
   return !parts.includes("node_modules") && !parts.includes(".git");
 }
 
-async function resolvePackageJsonPath(requireFrom, packageName) {
+export async function resolvePackageJsonPath(requireFrom, packageName) {
   try {
     return requireFrom.resolve(`${packageName}/package.json`);
   } catch (error) {

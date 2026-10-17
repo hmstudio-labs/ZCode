@@ -1,0 +1,115 @@
+# 手动触发的 zcode CLI npm 发布管线：
+# 构建 workspace → 组装自包含 npm 包（vendored 运行时）→ smoke 验证 → npm pack
+# → dry_run=false 时发布到 www.npmjs.com，否则仅上传 artifact 供审查。
+#
+# 首次使用前的一次性配置：
+# 1. npmjs.com 上创建 @kyvro scope（默认包名 @kyvro/zcode-cli，也可 dispatch 时传
+#    package_name 覆盖）。
+# 2. 仓库 Settings → Secrets and variables → Actions 添加 NPM_TOKEN
+#    （granular token，只授予 @kyvro/zcode-cli 的 publish 权限）。
+name: publish-cli-npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本；留空使用 apps/zcode-cli/package.json 的 version（与 bundle 内嵌版本同源）"
+        required: false
+        type: string
+      package_name:
+        description: "npm 包名；默认 @kyvro/zcode-cli"
+        required: false
+        type: string
+      dry_run:
+        description: "只打包并上传 artifact，不发布"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# npm 同名版本重复发布会直接报错；串行化避免并发 run 互相踩踏。
+concurrency:
+  group: publish-cli-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # 读取根 package.json 的 packageManager（pnpm@10.33.2）。
+      - uses: pnpm/action-setup@v4
+
+      # engines 取 apps/zcode-cli/package.json（24.14.0），与 bundle target 对齐。
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: apps/zcode-cli/package.json
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI workspace
+        # node-linker=hoisted（.npmrc）把 turbo 的 bin 链到仓库根 node_modules/.bin，
+        # 而 pnpm 不会把 workspace 根 .bin 加进 script PATH，直接跑会 turbo: command
+        # not found；这里显式前置根 .bin，让 apps/zcode-cli 的 `turbo run build` 原样执行。
+        run: PATH="$PWD/node_modules/.bin:$PATH" pnpm --dir apps/zcode-cli build
+
+      - name: Build TUI runtime workspace dists
+        # TUI 运行时闭包（stageTuiRuntime）包含 apps/zcode-cli turbo scope 之外的仓库根
+        # workspace 包 @zcode/shared 与 @zcode/model-option-map，要求其 dist 已构建；
+        # 本地开发通常由根 typecheck 的 `tsc -b` 顺带产出，CI 需要显式构建。
+        run: |
+          node_modules/.bin/tsc -b packages/shared
+          node_modules/.bin/tsc -p packages/model-option-map
+
+      - name: Stage npm package
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          args=(--out dist-npm)
+          [ -n "$PACKAGE_NAME" ] && args+=(--name "$PACKAGE_NAME")
+          [ -n "$VERSION" ] && args+=(--version "$VERSION")
+          node apps/zcode-cli/packages/cli/scripts/build-npm-package.mjs "${args[@]}"
+
+      - name: Smoke test staged bundle
+        run: |
+          # --version 走完整 boot 链路（进程初始化 → run 导入），退出 0 且输出与
+          # bundle 内嵌版本一致，足以证明 bundle 没有在加载期损坏。
+          # 注意 bundle 内嵌版本来自 apps/zcode-cli/package.json；dispatch 的 version
+          # input 只改 npm 包版本，两者允许不同（见 build-npm-package.mjs）。
+          expected="$(node -p "require('./apps/zcode-cli/package.json').version")"
+          actual="$(node dist-npm/dist/zcode.cjs --version)"
+          echo "smoke: zcode --version -> '$actual' (expected '$expected')"
+          if [ "$actual" != "$expected" ]; then
+            echo "Bundle boot failed or version mismatch" >&2
+            exit 1
+          fi
+
+      - name: Pack npm tarball
+        run: |
+          # dry-run 打印完整文件清单供日志审计（vendor 树必须出现、无多余文件）。
+          npm pack --dry-run ./dist-npm
+          npm pack --pack-destination dist-npm ./dist-npm
+          ls -lh dist-npm/*.tgz
+
+      - name: Publish to npmjs.com
+        if: ${{ inputs.dry_run == false }}
+        run: npm publish dist-npm/*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Upload package artifact
+        # dry-run 审查入口：下载 artifact 解开 tgz，核对 npm pack 清单后再真实发布。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode-cli-npm-package
+          path: dist-npm
+          if-no-files-found: error

@@ -36,6 +36,16 @@ export const loadTuiRuntime = async (): Promise<TuiRuntimeModule> => {
   const sea = await import("node:sea");
 
   if (!sea.isSea()) {
+    // npm 发行包把 @zcode/tui 及其依赖 vendored 到 dist/vendor/node_modules（见
+    // scripts/build-npm-package.mjs）；这些包不在公共 registry 上，只能走包内路径。
+    // CJS bundle 里 __dirname 指向 dist/；tsx 开发态是 ESM，__dirname 未定义，
+    // 没有 vendor 目录，回退裸 import 走 pnpm workspace 解析，保持原行为。
+    if (typeof __dirname !== "undefined") {
+      const vendoredEntry = join(__dirname, "vendor", packageEntryPath);
+      if (existsSync(vendoredEntry)) {
+        return await import(pathToFileURL(vendoredEntry).href);
+      }
+    }
     return await import("@zcode/tui");
   }
 

@@ -32,6 +32,17 @@ const PACKAGE_JSON_PATH = "node_modules/playwright-core/package.json";
 export async function loadCliPlaywrightChromium(): Promise<PlaywrightChromiumModule> {
   const sea = await import("node:sea");
   if (!sea.isSea()) {
+    // npm 发行包把 playwright-core vendored 到 dist/vendor/node_modules（见
+    // scripts/build-npm-package.mjs）。复用 SEA 分支的 createRequire 技巧，从 vendor
+    // 目录做标准解析。CJS bundle 里 __dirname 指向 dist/；tsx 开发态是 ESM，
+    // __dirname 未定义且没有 vendor 目录，回退裸 import 走 pnpm 解析，保持原行为。
+    if (typeof __dirname !== "undefined") {
+      const vendoredPackageJson = join(__dirname, "vendor", "node_modules", "playwright-core", "package.json");
+      if (existsSync(vendoredPackageJson)) {
+        const require = createRequire(join(__dirname, "vendor", "npm-loader.cjs"));
+        return require("playwright-core") as PlaywrightChromiumModule;
+      }
+    }
     return (await import("playwright-core")) as PlaywrightChromiumModule;
   }
 
