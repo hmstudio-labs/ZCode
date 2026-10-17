@@ -101,7 +101,9 @@ jobs:
 
       - name: Publish to npmjs.com
         if: ${{ inputs.dry_run == false }}
-        run: npm publish dist-npm/*.tgz
+        # 路径必须带 ./ 前缀：npm 会把 dist-npm/xxx.tgz 误解析成 github owner/repo
+        # 简写并用 git ls-remote 拉取，runner 无 SSH key 导致 Permission denied。
+        run: npm publish ./dist-npm/*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
